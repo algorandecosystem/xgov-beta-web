@@ -7,7 +7,7 @@ import {
 import {
   LiquidAuthClient,
   ICON as LiquidIcon,
-} from "@algorandfoundation/liquid-auth-use-wallet-client";
+} from "@algorandecosystem/liquid-auth-use-wallet-client";
 import type { Transaction } from "algosdk";
 
 const liquidOrigin = import.meta.env.PUBLIC_LIQUID_AUTH_ORIGIN;
@@ -21,26 +21,51 @@ function createLiquidProvider() {
     RTC_config_credential: liquidRtcCredential,
   });
 
+  let connectedWallet: string | null = null;
+
+  async function checkSession(): Promise<{ user?: { wallet: string } } | null> {
+    try {
+      const response = await fetch(`${liquidOrigin}/auth/session`, {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return data;
+      }
+      return null;
+    } catch (error) {
+      console.error("Error checking session:", error);
+      return null;
+    }
+  }
+
   return {
     async connect(): Promise<WalletAccount[]> {
-      await client.connect();
-      const session = await client.checkSession();
-      if (!session?.user?.wallet) {
-        throw new Error("Liquid Auth: no wallet address in session");
+      const walletAddress = await client.connect();
+      if (!walletAddress) {
+        throw new Error("Liquid Auth: no wallet address returned from connect");
       }
+      connectedWallet = walletAddress;
       return [
         {
           name: "Liquid Auth",
-          address: session.user.wallet,
+          address: walletAddress,
         },
       ];
     },
     async disconnect(): Promise<void> {
+      connectedWallet = null;
       await client.disconnect();
     },
     async resumeSession(): Promise<WalletAccount[] | void> {
-      const session = await client.checkSession();
+      const session = await checkSession();
       if (session?.user?.wallet) {
+        connectedWallet = session.user.wallet;
         return [
           {
             name: "Liquid Auth",
@@ -53,13 +78,16 @@ function createLiquidProvider() {
       txnGroup: T | T[],
       indexesToSign?: number[],
     ): Promise<(Uint8Array | null)[]> {
-      const session = await client.checkSession();
-      if (!session?.user?.wallet) {
-        throw new Error("Liquid Auth: not connected");
+      if (!connectedWallet) {
+        const session = await checkSession();
+        if (!session?.user?.wallet) {
+          throw new Error("Liquid Auth: not connected");
+        }
+        connectedWallet = session.user.wallet;
       }
       return client.signTransactions(
         txnGroup as any,
-        session.user.wallet,
+        connectedWallet,
         indexesToSign,
       );
     },

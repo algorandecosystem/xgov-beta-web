@@ -1,5 +1,5 @@
 /**
- * Postinstall script to build @algorandfoundation/liquid-client.
+ * Postinstall script to build @algorandecosystem/liquid-client.
  *
  * The published package ships only TypeScript source and a `prepare` script
  * that runs `tsc`. The compilation fails under TypeScript >=5.7 due to:
@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { execSync } from "node:child_process";
 
-const root = resolve("node_modules/@algorandfoundation/liquid-client");
+const root = resolve("node_modules/@algorandecosystem/liquid-client");
 
 // Skip if the package isn't installed (e.g. CI with --ignore-optional)
 if (!existsSync(root)) {
@@ -46,4 +46,4 @@ if (!signal.includes("@ts-ignore")) {
 
 // Build
 execSync("npx tsc", { cwd: root, stdio: "inherit" });
-console.log("@algorandfoundation/liquid-client built successfully");
+console.log("@algorandecosystem/liquid-client built successfully");

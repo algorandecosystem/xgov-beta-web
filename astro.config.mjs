@@ -2,7 +2,6 @@ import { defineConfig } from "astro/config";
 import tailwind from "@astrojs/tailwind";
 import cloudflare from "@astrojs/cloudflare";
 import react from "@astrojs/react";
-import { NodeGlobalsPolyfillPlugin } from "@esbuild-plugins/node-globals-polyfill";
 import { VitePWA } from "vite-plugin-pwa";
 import { manifest } from "./src/utils/manifest";
 
@@ -13,13 +12,17 @@ export default defineConfig({
     define: {
       global: "globalThis",
     },
-    build: {
-      rollupOptions: {
-        plugins: [
-          NodeGlobalsPolyfillPlugin({
-            buffer: true,
-          }),
-        ],
+    resolve: {
+      alias: {
+        stream: "stream-browserify",
+      },
+    },
+    optimizeDeps: {
+      include: ["buffer", "stream-browserify"],
+      esbuildOptions: {
+        define: {
+          global: "globalThis",
+        },
       },
     },
     plugins: [
