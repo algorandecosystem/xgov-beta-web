@@ -25,7 +25,7 @@ function resolveOrigin(requestOrigin: string | null): string | null {
   return allowed.includes(requestOrigin) ? requestOrigin : null;
 }
 
-export const onRequest = defineMiddleware(({ request }, next) => {
+export const onRequest = defineMiddleware(async ({ request }, next) => {
   const requestOrigin = request.headers.get("origin");
   const origin = resolveOrigin(requestOrigin);
 
@@ -36,13 +36,12 @@ export const onRequest = defineMiddleware(({ request }, next) => {
     return new Response(null, { status: 204, headers });
   }
 
-  return next().then((response) => {
-    if (origin) {
-      response.headers.set("Access-Control-Allow-Origin", origin);
-    }
-    for (const [key, value] of Object.entries(CORS_HEADERS)) {
-      response.headers.set(key, value);
-    }
-    return response;
-  });
+  const response = await next();
+  if (origin) {
+    response.headers.set("Access-Control-Allow-Origin", origin);
+  }
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    response.headers.set(key, value);
+  }
+  return response;
 });
