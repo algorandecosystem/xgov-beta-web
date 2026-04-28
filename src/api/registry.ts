@@ -56,9 +56,9 @@ export function proposalApprovalBoxName(): Uint8Array {
   );
 }
 
-export async function getGlobalState(client = registryClient): Promise<RegistryGlobalState | undefined> {
+export async function getGlobalState(): Promise<RegistryGlobalState | undefined> {
   try {
-    const state = await client.state.global.getAll()
+    const state = await registryClient.state.global.getAll()
     return {
       ...state,
       committeeManager: !!state.committeeManager ? state.committeeManager : '',
@@ -208,7 +208,6 @@ export async function getDelegatedXGovData(account: string): Promise<(XGovBoxVal
   const results: (XGovBoxValue & { xgov: string })[] = [];
   for (let i = 0; i < all.length; i += 63) {
     const chunk = all.slice(i, i + 63);
-
     results.push(
       ...(
         (await ghost.getXGovs(algorand, BigInt(registryAppID), chunk))
@@ -375,8 +374,11 @@ export async function subscribeXgov({
 
   setStatus("loading");
 
+  console.log("[subscribeXgov] Checking params - activeAddress:", activeAddress, "transactionSigner exists:", !!transactionSigner);
+
   if (!activeAddress || !transactionSigner) {
-    setStatus(new Error("No active address or transaction signer"));
+    console.error("[subscribeXgov] Missing required params - activeAddress:", activeAddress, "transactionSigner:", !!transactionSigner);
+    setStatus(new Error("No active address or transaction signer - please check your wallet connection"));
     return;
   }
 
@@ -387,47 +389,132 @@ export async function subscribeXgov({
 
   const suggestedParams = await algorand.getSuggestedParams();
 
-  const payment = makePaymentTxnWithSuggestedParamsFromObject({
-    sender: activeAddress,
-    receiver: algosdk.getApplicationAddress(RegistryAppID),
-    amount: xgovFee,
-    suggestedParams,
-  });
+  // RAW APPROACH: Build and sign transactions manually instead of using composer
+  try {
+    console.log("[subscribeXgov] Using RAW approach - building algosdk transactions...");
 
-  let builder: XGovRegistryComposer<any> = registryClient.newGroup();
+    // Array to hold all transactions
+    const txns: algosdk.Transaction[] = [];
 
-  if (network === "testnet") {
-    builder = builder.addTransaction(
-      await registryClient.algorand.createTransaction.payment({
+    // 1. Funding transaction (testnet only) - will be signed by logic sig
+    if (network === "testnet") {
+      console.log("[subscribeXgov] Adding funding transaction");
+      const fundingTxn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
         sender: fundingLogicSig.address(),
         receiver: activeAddress,
-        amount: (100).algos(),
-      }),
-      fundingLogicSigSigner,
-    );
-  }
+        amount: 100_000_000, // 100 ALGO
+        suggestedParams,
+      });
+      txns.push(fundingTxn);
+    }
 
-  builder = builder.subscribeXgov({
-    sender: activeAddress,
-    signer: transactionSigner,
-    args: {
-      payment,
-      votingAddress: activeAddress,
-    },
-    boxReferences: [
-      xGovBoxName(activeAddress),
-    ],
-  });
+    // 2. Payment transaction for xGov fee
+    const paymentTxn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      sender: activeAddress,
+      receiver: algosdk.getApplicationAddress(RegistryAppID),
+      amount: xgovFee,
+      suggestedParams,
+    });
+    txns.push(paymentTxn);
 
-  try {
-    await builder.send();
+    // 3. App call transaction for subscribeXgov
+    const methodSignature = "subscribe_xgov(address,pay)void";
+    const boxName = xGovBoxName(activeAddress);
+    
+    // Method selector for "subscribe_xgov(address,pay)void" 
+    // First 4 bytes of SHA-512/256 hash: a082cef8
+    const methodSelector = new Uint8Array([0xa0, 0x82, 0xce, 0xf8]);
+    
+    // Build app args: method selector + voting_address
+    const appArgs = [
+      methodSelector,
+      // voting_address (32 bytes public key)
+      algosdk.decodeAddress(activeAddress).publicKey,
+    ];
+    
+    const appCallTxn = algosdk.makeApplicationCallTxnFromObject({
+      sender: activeAddress,
+      appIndex: Number(RegistryAppID),
+      onComplete: algosdk.OnApplicationComplete.NoOpOC,
+      appArgs,
+      boxes: [
+        { appIndex: Number(RegistryAppID), name: boxName },
+      ],
+      suggestedParams: {
+        ...suggestedParams,
+        fee: 3000, // Fee for the app call
+      },
+    });
+    txns.push(appCallTxn);
+
+    console.log("[subscribeXgov] Created", txns.length, "transactions");
+
+    // Group the transactions
+    const groupId = algosdk.computeGroupID(txns);
+    for (const txn of txns) {
+      txn.group = groupId;
+    }
+    console.log("[subscribeXgov] Assigned group ID");
+
+    // Sign transactions
+    const signedTxns: (Uint8Array | null)[] = new Array(txns.length).fill(null);
+    
+    // 1. Sign funding transaction with logic sig (if testnet)
+    if (network === "testnet") {
+      console.log(`[subscribeXgov] Signing transaction 0 with logic sig...`);
+      const signed = algosdk.signLogicSigTransactionObject(txns[0], fundingLogicSig);
+      signedTxns[0] = signed.blob;
+      console.log(`[subscribeXgov] Transaction 0 signed with logic sig (${signed.blob.length} bytes)`);
+    }
+    
+    // 2. Sign all user transactions together (payment + app call)
+    // These need to be signed as a group by the user
+    const userTxnIndexes = network === "testnet" 
+      ? [1, 2]  // Skip funding (index 0)
+      : [0, 1]; // All transactions (no funding)
+    
+    const userTxns = userTxnIndexes.map(i => txns[i]);
+    console.log(`[subscribeXgov] Signing ${userTxns.length} user transactions together...`);
+    
+    const signResults = await transactionSigner(userTxns, userTxnIndexes);
+    
+    // Check all signatures received
+    for (let i = 0; i < userTxnIndexes.length; i++) {
+      const originalIndex = userTxnIndexes[i];
+      if (!signResults[i]) {
+        throw new Error(`Failed to sign transaction ${originalIndex}`);
+      }
+      signedTxns[originalIndex] = signResults[i];
+      console.log(`[subscribeXgov] Transaction ${originalIndex} signed (${signResults[i].length} bytes)`);
+    }
+
+    // Verify all transactions are signed
+    if (signedTxns.some(tx => tx === null)) {
+      throw new Error("Not all transactions were signed");
+    }
+
+    console.log("[subscribeXgov] All transactions signed, sending to network...");
+
+    console.log("[subscribeXgov] All transactions signed, sending to network...");
+
+    // Send transactions as a group
+    const sendResponse = await algod.sendRawTransaction(signedTxns).do();
+    const txId = typeof sendResponse === 'string' ? sendResponse : (sendResponse as { txid: string }).txid;
+    console.log("[subscribeXgov] Group sent, txId:", txId);
+
+    // Wait for confirmation
+    console.log("[subscribeXgov] Waiting for confirmation...");
+    const confirmation = await algosdk.waitForConfirmation(algod, txId, 4);
+    console.log("[subscribeXgov] Confirmed in round:", confirmation.confirmedRound);
+
     setStatus("confirmed");
     await sleep(800);
     setStatus("idle");
     await Promise.all(refetch.map(r => r()));
+
   } catch (e: any) {
-    console.error("Error during subscribeXgov:", e.message);
-    setStatus(new Error(`Failed to subscribe to be a xGov`));
+    console.error("Error during subscribeXgov:", e);
+    setStatus(new Error(`Failed to subscribe to be a xGov: ${e.message}`));
     return;
   }
 };
