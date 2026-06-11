@@ -11,6 +11,7 @@ interface Props {
 // Get the title from the props
 const { title, description } = Astro.props;
 const _title = title ? `${title} | ` : "";
+const isDev = import.meta.env.DEV;
 ---
 
 <html lang="en">
@@ -22,7 +23,7 @@ const _title = title ? `${title} | ` : "";
     <meta name="generator" content={Astro.generator} />
     <title>{`${_title}xGov`}</title>
     <!-- PWA Support -->
-    <link rel="manifest" href="/manifest.webmanifest" />
+    {!isDev && <link rel="manifest" href="/manifest.webmanifest" />}
     <meta name="theme-color" content="#FFFFFF" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -31,10 +32,12 @@ const _title = title ? `${title} | ` : "";
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Aeonik font faces -->
-    <link
-      href="https://d3qysudl7slyhp.cloudfront.net/stylesheet-family-support.css"
-      rel="stylesheet"
-    />
+    {!isDev && (
+      <link
+        href="https://d3qysudl7slyhp.cloudfront.net/stylesheet-family-support.css"
+        rel="stylesheet"
+      />
+    )}
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap"
       rel="stylesheet"
@@ -77,13 +80,23 @@ const _title = title ? `${title} | ` : "";
     <slot />
     <Devtools client:load />
     <!-- PWA Service Worker Registration -->
-    <script is:inline>
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js', { scope: '/' });
-        });
-      }
-    </script>
+    {!isDev ? (
+      <script is:inline>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' });
+          });
+        }
+      </script>
+    ) : (
+      <script is:inline>
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then((registrations) => {
+            registrations.forEach((registration) => registration.unregister());
+          });
+        }
+      </script>
+    )}
   </body>
 </html>
 <style is:global>

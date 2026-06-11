@@ -149,7 +149,7 @@ function createLiquidProvider() {
 
   let connectedWallet: string | null = null;
 
-  async function checkSession(): Promise<{ user?: { wallet: string } } | null> {
+  async function checkSession(): Promise<any | null> {
     try {
       console.log("[Liquid Auth] Fetching session from:", `${liquidOrigin}/auth/session`);
       const response = await fetch(`${liquidOrigin}/auth/session`, {
@@ -174,6 +174,19 @@ function createLiquidProvider() {
       console.log("[Liquid Auth] Session check error:", error);
       return null;
     }
+  }
+
+  function extractWalletFromSession(session: any): string | null {
+    const candidate =
+      session?.user?.wallet ??
+      session?.user?.address ??
+      session?.session?.wallet ??
+      session?.session?.address ??
+      session?.wallet ??
+      session?.address ??
+      null;
+
+    return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
   }
 
   // Track last activity timestamp for connection health
@@ -204,19 +217,45 @@ function createLiquidProvider() {
 
   async function ensureConnection(): Promise<string> {
     logConnectionState("Checking connection");
-    
-    const dc = (client as any).dataChannel;
+
+    let dc = (client as any).dataChannel;
     const safeLastActivity = getSafeLastActivity();
     const elapsed = Date.now() - safeLastActivity;
-    
-    if (connectedWallet && dc?.readyState === "open" && elapsed < 300000) {
-      console.log("[Liquid Auth] Using existing connection for wallet:", connectedWallet);
+
+    // If the data channel is still open, use existing connection even when idle for >5m
+    if (connectedWallet && dc?.readyState === "open") {
+      if (elapsed >= 300000) {
+        console.log("[Liquid Auth] Connection is open after idle timeout; reusing existing session");
+      } else {
+        console.log("[Liquid Auth] Using existing connection for wallet:", connectedWallet);
+      }
+      lastActivity = Date.now();
       return connectedWallet;
     }
-    
-    console.log("[Liquid Auth] Connection unhealthy - not reconnecting per request");
+
+    console.log("[Liquid Auth] Connection unhealthy, attempting session recovery...");
+
+    // Try recovering from HTTP/WebRTC session only (do NOT force a fresh connect popup while signing)
+    try {
+      const session = await checkSession();
+      const recoveredWallet = extractWalletFromSession(session);
+      if (recoveredWallet) {
+        connectedWallet = recoveredWallet;
+      }
+
+      dc = (client as any).dataChannel;
+      if (connectedWallet && dc?.readyState === "open") {
+        lastActivity = Date.now();
+        console.log("[Liquid Auth] Recovered existing WebRTC session:", connectedWallet);
+        return connectedWallet;
+      }
+    } catch (error) {
+      console.log("[Liquid Auth] Session recovery failed:", error);
+    }
+
+    console.log("[Liquid Auth] Connection still unhealthy after recovery attempts");
     console.log("  - Reason:", !connectedWallet ? "No wallet" : dc?.readyState !== "open" ? "Data channel closed" : "Timeout exceeded");
-    throw new Error("Liquid Auth: WebRTC connection unhealthy");
+    throw new Error("Liquid Auth connection unavailable. Please reconnect Liquid from the wallet menu, then try voting again.");
   }
 
   async function logIceStats(): Promise<void> {
@@ -298,13 +337,14 @@ function createLiquidProvider() {
 
       // First try HTTP session endpoint (now with fixed CORS)
       const session = await checkSession();
-      if (session?.user?.wallet) {
-        console.log("[Liquid Auth] Resumed session from HTTP:", session.user.wallet);
-        connectedWallet = session.user.wallet;
+      const recoveredWallet = extractWalletFromSession(session);
+      if (recoveredWallet) {
+        console.log("[Liquid Auth] Resumed session from HTTP:", recoveredWallet);
+        connectedWallet = recoveredWallet;
         return [
           {
             name: "Liquid Auth",
-            address: session.user.wallet,
+            address: recoveredWallet,
           },
         ];
       }
@@ -339,59 +379,134 @@ function createLiquidProvider() {
         return new Promise((resolve, reject) => {
           const dc = (client as any).dataChannel;
           let responseReceived = false;
-          
+
           const messageHandler = (e: MessageEvent) => {
             if (responseReceived) return;
-            
+
             console.log("[Liquid Auth] Raw message received:", e.data?.substring(0, 200));
-            
+
             try {
               const decoded = cbor.decodeFirstSync(fromBase64Url(e.data));
               console.log("[Liquid Auth] Decoded message:", decoded);
-              
+
               // Check if this is a sign_transactions response
               if (decoded?.reference === "arc0027:sign_transactions:response") {
-                responseReceived = true;
-                
                 if (decoded.error) {
+                  responseReceived = true;
                   console.error("[Liquid Auth] Sign error from app:", decoded.error);
                   reject(new Error(`Sign error: ${decoded.error}`));
                   return;
                 }
-                
+
                 // Extract signed transactions from result.stxns
                 const stxns = decoded.result?.stxns || [];
                 console.log("[Liquid Auth] Extracted", stxns.length, "signed transactions from response");
                 console.log("[Liquid Auth] txnGroup has", txnGroup.length, "original transactions");
-                
-                // The mobile app returns just signatures (64 bytes each)
-                // We need to reconstruct full signed transactions
-                const results = stxns.map((stxn: string, i: number) => {
+
+                const originalTxIds = new Set(txnGroup.map((txn) => txn.txID()));
+                const signedByTxId = new Map<string, Uint8Array>();
+                const positionalSigned: Array<Uint8Array | null> = new Array(txnGroup.length).fill(null);
+                const fullSignedBundle: Uint8Array[] = [];
+
+                for (let i = 0; i < stxns.length; i++) {
+                  const stxn = stxns[i];
                   const signatureBytes = fromBase64Url(stxn);
                   console.log(`[Liquid Auth] Signature ${i}: ${signatureBytes.length} bytes`);
-                  
-                  // If it's a full signed transaction already (large), use it directly
+
+                  // Full signed txn (msgpack) - decode and keep only ones that belong to current txnGroup
                   if (signatureBytes.length > 200) {
-                    console.log(`[Liquid Auth] Transaction ${i} is already fully signed (${signatureBytes.length} bytes)`);
-                    return signatureBytes;
+                    try {
+                      const decodedSignedTxn = algosdk.decodeSignedTransaction(signatureBytes);
+                      const txId = decodedSignedTxn.txn.txID();
+
+                      if (!originalTxIds.has(txId)) {
+                        console.log(`[Liquid Auth] Signed txn ${i} txid ${txId} is outside original group (likely server-regrouped bundle); keeping for full-bundle mode`);
+                        fullSignedBundle.push(signatureBytes);
+                        continue;
+                      }
+
+                      console.log(`[Liquid Auth] Transaction ${i} matches current group txid ${txId}`);
+
+                      // Prefer compact direct signature format when available.
+                      // Sending full lsig-wrapped signed txns can exceed group LogicSig byte pool.
+                      if (decodedSignedTxn.sig && decodedSignedTxn.sig.length === 64) {
+                        const originalTxn = txnGroup.find((txn) => txn.txID() === txId);
+                        if (!originalTxn) {
+                          console.log(`[Liquid Auth] Could not find original txn for txid ${txId}; ignoring`);
+                          continue;
+                        }
+
+                        const compactSignedTxn = algosdk.encodeObj({
+                          sig: decodedSignedTxn.sig,
+                          txn: algosdk.decodeObj(originalTxn.toByte()),
+                        });
+
+                        console.log(`[Liquid Auth] Rebuilt compact signed txn for ${txId} (${compactSignedTxn.length} bytes)`);
+                        signedByTxId.set(txId, compactSignedTxn);
+                        fullSignedBundle.push(compactSignedTxn);
+                        continue;
+                      }
+
+                      // Fail fast with a clear wallet-format error instead of sending oversized LogicSig payloads.
+                      if (decodedSignedTxn.lsig) {
+                        throw new Error(
+                          `Wallet returned LogicSig-signed txn for ${txId}; expected direct account signature for this vote flow`,
+                        );
+                      }
+
+                      // Fallback for other valid formats (e.g., multisig)
+                      signedByTxId.set(txId, signatureBytes);
+                      fullSignedBundle.push(signatureBytes);
+                    } catch (decodeError) {
+                      const message = (decodeError as Error)?.message || String(decodeError);
+                      if (message.includes("Wallet returned LogicSig-signed txn")) {
+                        responseReceived = true;
+                        reject(new Error(message));
+                        return;
+                      }
+                      console.log(`[Liquid Auth] Could not decode signed txn ${i}; ignoring`, decodeError);
+                    }
+                    continue;
                   }
-                  
-                  // Otherwise, reconstruct the signed transaction from signature + original txn
+
+                  // 64-byte signature response - reconstruct transaction by position (if index is valid)
+                  if (i >= txnGroup.length) {
+                    console.log(`[Liquid Auth] Ignoring extra signature ${i} (no matching original txn index)`);
+                    continue;
+                  }
+
                   const originalTxn = txnGroup[i];
                   console.log(`[Liquid Auth] Reconstructing signed transaction ${i} from ${signatureBytes.length}-byte signature`);
-                  
-                  // Build the signed transaction object
+
                   const signedTxnObj = {
                     sig: signatureBytes,
                     txn: algosdk.decodeObj(originalTxn.toByte()),
                   };
-                  
-                  // Encode to msgpack
+
                   const signedTxnBytes = algosdk.encodeObj(signedTxnObj);
                   console.log(`[Liquid Auth] Reconstructed transaction ${i}: ${signedTxnBytes.length} bytes`);
-                  return signedTxnBytes;
-                });
-                resolve(results);
+                  positionalSigned[i] = signedTxnBytes;
+                  fullSignedBundle.push(signedTxnBytes);
+                }
+
+                const orderedResults = txnGroup.map((txn, i) => signedByTxId.get(txn.txID()) ?? positionalSigned[i]);
+                const matchedCount = orderedResults.filter(Boolean).length;
+
+                // Accept augmented signer bundle mode (server added dummy txns and regrouped).
+                if (fullSignedBundle.length > txnGroup.length) {
+                  console.log(`[Liquid Auth] Accepting augmented signed bundle (${fullSignedBundle.length} txns) from signer`);
+                  responseReceived = true;
+                  resolve(fullSignedBundle);
+                  return;
+                }
+
+                if (matchedCount < txnGroup.length) {
+                  console.log(`[Liquid Auth] Ignoring stale/mismatched sign response (matched ${matchedCount}/${txnGroup.length}); waiting for next response...`);
+                  return;
+                }
+
+                responseReceived = true;
+                resolve(orderedResults as Uint8Array[]);
               }
             } catch (err) {
               console.log("[Liquid Auth] Unable to decode message (likely not CBOR)");
@@ -425,8 +540,13 @@ function createLiquidProvider() {
         lastActivity = Date.now();
         return results;
       } catch (error) {
-        console.log("[Liquid Auth] Signing timed out (5 min) - no response from mobile app yet.");
-        console.log("[Liquid Auth] A late response was seen previously; try waiting longer or retry manually.");
+        const message = (error as Error)?.message || String(error);
+        if (message.toLowerCase().includes("timeout")) {
+          console.log("[Liquid Auth] Signing timed out (5 min) - no response from mobile app yet.");
+          console.log("[Liquid Auth] A late response was seen previously; try waiting longer or retry manually.");
+        } else {
+          console.log("[Liquid Auth] Signing failed:", message);
+        }
         throw error;
       }
     },

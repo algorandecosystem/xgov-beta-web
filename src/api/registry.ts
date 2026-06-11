@@ -498,7 +498,8 @@ export async function subscribeXgov({
     console.log("[subscribeXgov] All transactions signed, sending to network...");
 
     // Send transactions as a group
-    const sendResponse = await algod.sendRawTransaction(signedTxns).do();
+    const validSignedTxns = signedTxns.filter((tx): tx is Uint8Array => tx !== null);
+    const sendResponse = await algod.sendRawTransaction(validSignedTxns).do();
     const txId = typeof sendResponse === 'string' ? sendResponse : (sendResponse as { txid: string }).txid;
     console.log("[subscribeXgov] Group sent, txId:", txId);
 

@@ -50,6 +50,7 @@ export interface CommitteeFileSummary {
 
 const COMMITTEE_FILE_NAME_PATTERN = /^[A-Za-z0-9_-]+\.json$/;
 const DEFAULT_COMMITTEE_R2_PREFIX = "";
+const DEFAULT_COMMITTEE_PUBLIC_ORIGIN = "https://xgov.algorand.co";
 
 function isCommitteeMember(member: unknown): member is CommitteeMember {
   return (
@@ -115,6 +116,14 @@ export function getCommitteeR2Prefix(locals: App.Locals): string {
   return prefix.endsWith("/") ? prefix : `${prefix}/`;
 }
 
+export function getCommitteePublicOrigin(locals: App.Locals): string {
+  return getStringEnvironmentVariable(
+    "COMMITTEE_PUBLIC_ORIGIN",
+    locals,
+    DEFAULT_COMMITTEE_PUBLIC_ORIGIN,
+  ).replace(/\/$/, "");
+}
+
 export function isValidCommitteeFileName(fileName: string): boolean {
   return COMMITTEE_FILE_NAME_PATTERN.test(fileName);
 }
@@ -175,8 +184,27 @@ export async function getCommitteeFileResponse(
 
   const bucket = getCommitteeBucket(locals);
   if (!bucket) {
-    return new Response("COMMITTEE_BUCKET R2 binding is not configured", {
-      status: 500,
+    const upstreamUrl = `${getCommitteePublicOrigin(locals)}/api/committees/${fileName}`;
+    const upstreamResponse = await fetch(upstreamUrl, {
+      headers: {
+        accept: request.headers.get("accept") ?? "application/json",
+        "if-none-match": request.headers.get("if-none-match") ?? "",
+      },
+    });
+
+    const headers = new Headers({
+      "cache-control": upstreamResponse.headers.get("cache-control") ?? "public, max-age=60",
+      "content-type": upstreamResponse.headers.get("content-type") ?? "application/json",
+    });
+    const etag = upstreamResponse.headers.get("etag");
+    if (etag) {
+      headers.set("etag", etag);
+    }
+
+    return new Response(await upstreamResponse.text(), {
+      headers,
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
     });
   }
 

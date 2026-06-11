@@ -5,7 +5,7 @@ import {
   councilVote,
 } from "@/api";
 import { UseWallet } from "@/hooks/useWallet.tsx";
-import { UseQuery, useCouncilVotes, useCouncilMembers, useProposal } from "@/hooks";
+import { UseQuery, useCouncilVotes, useCouncilMembers, useNFDs, useProposal } from "@/hooks";
 import { CheckIcon, XIcon, HelpCircleIcon, ArrowUpIcon, ArrowDownIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
@@ -54,16 +54,22 @@ export function ProposalCouncilCard({
   // Always fetch council data to show the status bar
   const councilVotesQuery = useCouncilVotes(Number(proposalId), true);
   const councilMembersQuery = useCouncilMembers();
+  const councilMemberAddresses = councilMembersQuery.data || [];
+  const nfdQuery = useNFDs(councilMemberAddresses, councilMemberAddresses.length > 0);
 
   // Calculate council vote counts
   const councilVotes = councilVotesQuery.data || [];
-  const totalCouncilMembers = councilMembersQuery.data?.length || 0;
+  const totalCouncilMembers = councilMemberAddresses.length;
   
   const approvingCouncilMembers = councilVotes.filter(vote => !vote.block).length;
   const approvalsNeededToFund = Math.ceil(totalCouncilMembers / 2) - approvingCouncilMembers;
   const blockingCouncilMembers = councilVotes.filter(vote => vote.block).length;
   const rejectionsNeededToBlock = Math.ceil(totalCouncilMembers / 2) - blockingCouncilMembers;
   const notVotedCouncilMembers = totalCouncilMembers - councilVotes.length;
+  const votedCouncilAddresses = new Set(councilVotes.map(vote => vote.address));
+  const notVotedCouncilMemberAddresses = councilMemberAddresses
+    .filter(address => !votedCouncilAddresses.has(address));
+  const getCouncilMemberLabel = (address: string) => nfdQuery.data?.[address]?.name || address;
   
 
   // Check if current user is a council member and their vote status
@@ -110,12 +116,71 @@ export function ProposalCouncilCard({
           rejections={blockingCouncilMembers}
           nulls={notVotedCouncilMembers}
         />
-        <div className="mt-2 text-xs text-algo-black-50 dark:text-white/50">
-          {councilVotes.length} of {totalCouncilMembers} council members have voted
-        </div>
-        {councilVotesQuery.isLoading && (
-          <div className="text-xs text-algo-black-50 dark:text-white/50 mt-1">
+        {councilVotesQuery.isLoading || councilMembersQuery.isLoading ? (
+          <div className="text-xs text-algo-black-50 dark:text-white/50 mt-2">
             Loading council votes...
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4 text-xs">
+            <div className="text-algo-black-50 dark:text-white/50">
+              {councilVotes.length} of {totalCouncilMembers} council members have voted
+            </div>
+
+            <div>
+              <div className="mb-2 font-medium text-algo-black dark:text-white">
+                Not voted ({notVotedCouncilMemberAddresses.length})
+              </div>
+              {notVotedCouncilMemberAddresses.length > 0 ? (
+                <div className="space-y-1">
+                  {notVotedCouncilMemberAddresses.map(address => (
+                    <div
+                      key={address}
+                      className="break-all rounded-md bg-algo-yellow/10 px-2 py-1 font-mono text-algo-black-70 dark:text-white/70"
+                    >
+                      {getCouncilMemberLabel(address)}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-algo-black-50 dark:text-white/50">
+                  All council members have voted.
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div className="mb-2 font-medium text-algo-black dark:text-white">
+                Voted ({councilVotes.length})
+              </div>
+              {councilVotes.length > 0 ? (
+                <div className="space-y-1">
+                  {councilVotes.map(vote => (
+                    <div
+                      key={vote.address}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-algo-black-5 px-2 py-1 dark:bg-white/5"
+                    >
+                      <span className="break-all font-mono text-algo-black-70 dark:text-white/70">
+                        {getCouncilMemberLabel(vote.address)}
+                      </span>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full px-2 py-0.5 font-medium",
+                          vote.block
+                            ? "bg-algo-red/10 text-algo-red"
+                            : "bg-algo-green/10 text-algo-green"
+                        )}
+                      >
+                        {vote.block ? "Block" : "Approve"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-algo-black-50 dark:text-white/50">
+                  No council members have voted yet.
+                </div>
+              )}
+            </div>
           </div>
         )}
 

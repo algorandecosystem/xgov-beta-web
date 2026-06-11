@@ -730,7 +730,10 @@ export async function voteProposal({
   rejections,
   voterInfo
 }: VoteProposalProps) {
-  if (!innerSigner) return;
+  if (!innerSigner) {
+    setStatus(new Error("Wallet signer unavailable. Reconnect your wallet and try again."));
+    return;
+  }
 
   const transactionSigner = wrapTransactionSigner(
     innerSigner,
@@ -745,17 +748,19 @@ export async function voteProposal({
   }
 
   if (!voterInfo) {
-    console.log('Voter info not found');
-    return false;
+    setStatus(new Error("Voter info not found for this proposal. Please refresh and try again."));
+    return;
   }
 
   if (!xgovAddress) {
-    console.log('xGov address not found');
-    return false;
+    setStatus(new Error("xGov address not found. Please select a voting address and try again."));
+    return;
   }
 
   try {
-    const res = await registryClient.send.voteProposal({
+    const txns: algosdk.Transaction[] = [];
+
+    const voteTxnRes = await (registryClient as any).createTransaction.voteProposal({
       sender: activeAddress,
       signer: transactionSigner,
       args: {
@@ -773,10 +778,63 @@ export async function voteProposal({
       extraFee: (1000).microAlgos(),
     });
 
+    const voteTxn = voteTxnRes?.transactions?.[0]?.txn ?? voteTxnRes?.transactions?.[0];
+    if (!voteTxn) {
+      throw new Error("Failed to build vote transaction");
+    }
+    txns.push(voteTxn as algosdk.Transaction);
+
+    // Explicit op-up transactions in the same atomic group for extra budget/reference room.
+    for (let i = 0; i < 0; i++) {
+      const opUpRes = await (registryClient as any).createTransaction.opUp({
+        sender: activeAddress,
+        signer: transactionSigner,
+        args: {},
+        note: `vote-opup-${i}`,
+      });
+      const opUpTxn = opUpRes?.transactions?.[0]?.txn ?? opUpRes?.transactions?.[0];
+      if (!opUpTxn) {
+        throw new Error(`Failed to build opUp transaction ${i}`);
+      }
+      txns.push(opUpTxn as algosdk.Transaction);
+    }
+
+    if (txns.length === 0) {
+      throw new Error("Vote group build produced no transactions");
+    }
+
+    console.log(`[voteProposal] Built ${txns.length} txns for signing (without client-assigned group ID)`);
+    console.log("[voteProposal] Tx IDs:", txns.map((txn) => txn.txID()));
+
+    // Request signer for the current txns; signer may return an augmented bundle
+    // (e.g., Falcon/server-added dummy txns with recomputed group id).
+    const userTxnIndexes = txns.map((_, i) => i);
+    const userTxns = userTxnIndexes.map((i) => txns[i]);
+    console.log(`[voteProposal] Signing ${userTxns.length} user transactions together...`);
+
+    const signResults = await transactionSigner(userTxns, userTxnIndexes);
+    if (!signResults || signResults.length === 0) {
+      throw new Error("No signed transactions returned from signer");
+    }
+
+    const validSignedTxns = signResults.filter((tx): tx is Uint8Array => !!tx);
+    if (validSignedTxns.length === 0) {
+      throw new Error("Signer returned empty signed transaction bundle");
+    }
+
+    console.log(`[voteProposal] Sending ${validSignedTxns.length} signed txns...`);
+    const sendResponse = await algorand.client.algod.sendRawTransaction(validSignedTxns).do();
+    const txId = typeof sendResponse === "string"
+      ? sendResponse
+      : (sendResponse as { txid: string }).txid;
+    console.log("[voteProposal] Group sent, txId:", txId);
+
+    const confirmation = await algosdk.waitForConfirmation(algorand.client.algod, txId, 4);
+
     if (
-      res.confirmation.confirmedRound !== undefined &&
-      res.confirmation.confirmedRound > 0 &&
-      res.confirmation.poolError === ''
+      confirmation.confirmedRound !== undefined &&
+      confirmation.confirmedRound > 0 &&
+      confirmation.poolError === ""
     ) {
       setStatus("confirmed");
       await sleep(800);
@@ -785,7 +843,7 @@ export async function voteProposal({
       return;
     }
 
-    console.error("Vote proposal failed:", res);
+    console.error("Vote proposal failed confirmation:", confirmation);
     setStatus(new Error("Failed to vote on the proposal."));
   } catch (e: any) {
     console.error("Error during voting:", e.message);

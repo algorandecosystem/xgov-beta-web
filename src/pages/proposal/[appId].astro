@@ -1,5 +1,5 @@
 ---
-import { getGlobalState, getProposal, getProposalsByProposer, getProposalClientById, getRegistryClient, getAlgorandClient } from "@/api";
+import { getGlobalState, getProposal, getProposalsByProposer, getAlgorandClient } from "@/api";
 
 import Layout from "@/layouts/Layout.astro";
 import Page from "@/layouts/Page.astro";
@@ -39,11 +39,10 @@ if (!appId) {
 
 const network = env.PUBLIC_NETWORK
 
-const privateAlgorand = await getAlgorandClient(Astro.locals, ["BACKEND", "PUBLIC"]);
-const registryClient = await getRegistryClient(privateAlgorand);
+const privateAlgorand = getAlgorandClient(Astro.locals, ["BACKEND", "PUBLIC"]);
 
 const [registryGlobalState, proposal] = await Promise.all([
-  getGlobalState(registryClient),
+  getGlobalState(),
   getProposal(BigInt(appId), privateAlgorand)
 ]);
 

@@ -1,5 +1,5 @@
 ---
-import { getAllProposals, getGlobalState, getRegistryClient, getAlgorandClient } from "@/api";
+import { getAllProposals, getGlobalState, getAlgorandClient } from "@/api";
 
 import Layout from "@/layouts/Layout.astro";
 import LandingPage from "@/layouts/LandingPage.astro";
@@ -17,10 +17,9 @@ const description =
 
 
 const privateAlgorand = getAlgorandClient(Astro.locals, ["BACKEND", "PUBLIC"]);
-const registryClient = getRegistryClient(privateAlgorand);
 
 const [registry, proposals] = await Promise.all([
-  getGlobalState(registryClient),
+  getGlobalState(),
   getAllProposals(privateAlgorand),
 ]);
 ---

@@ -536,6 +536,7 @@ function VotingStatusCard({
             </div>
             <TransactionErrorDialog status={approveStatus} setStatus={setApproveStatus} />
             <TransactionErrorDialog status={rejectStatus} setStatus={setRejectStatus} />
+            <TransactionErrorDialog status={abstainStatus} setStatus={setAbstainStatus} />
             <TransactionErrorDialog status={boycottStatus} setStatus={setBoycottStatus} />
           </div>
         )
