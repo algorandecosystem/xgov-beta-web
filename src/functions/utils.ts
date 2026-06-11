@@ -42,6 +42,9 @@ export function getStringEnvironmentVariable(
         return (env as Record<string, string>)[key];
       }
     }
+    if (typeof process !== "undefined" && process.env && key in process.env && !!process.env[key]) {
+      return process.env[key] as string;
+    }
   }
   return defaultValue;
 }
