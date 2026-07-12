@@ -1,5 +1,10 @@
 ---
-import { getAllProposals, getGlobalState, getAlgorandClient } from "@/api";
+import {
+  getAllProposals,
+  getGlobalState,
+  getAlgorandClient,
+  getMissedVoteRiskStats,
+} from "@/api";
 
 import Layout from "@/layouts/Layout.astro";
 import LandingPage from "@/layouts/LandingPage.astro";
@@ -22,6 +27,7 @@ const [registry, proposals] = await Promise.all([
   getGlobalState(),
   getAllProposals(privateAlgorand),
 ]);
+const missedVoteRiskStats = await getMissedVoteRiskStats(registry);
 ---
 
 <Layout description={description}>
@@ -36,6 +42,7 @@ const [registry, proposals] = await Promise.all([
         title={title}
         description={description}
         xgovs={Number(registry?.committeeMembers) || 0}
+        missedVoteStats={missedVoteRiskStats}
         proposals={proposals.length}
         treasury={Number(registry?.outstandingFunds) / 1e6 || 0}
         votes={Number(registry?.committeeVotes) || 0}

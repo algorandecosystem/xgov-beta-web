@@ -36,7 +36,8 @@ export async function loadCommitteeFromAPI(
   safeCommitteeId: string,
   committeeIdStr: string,
 ): Promise<CommitteeData | null> {
-  const url = `/api/committees/${safeCommitteeId}.json`;
+  const origin = typeof window === "undefined" ? "https://xgov.algorand.co" : "";
+  const url = `${origin}/api/committees/${safeCommitteeId}.json`;
 
   try {
     const response = await fetch(url);

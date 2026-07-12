@@ -2,7 +2,9 @@ import algosdk from "algosdk";
 import { indexer, network } from "@/api/algorand/algo-client";
 import { RegistryAppID } from "@/api/algorand/contract-clients";
 import { getAllProposals } from "@/api/proposals";
-import { getXGovCommitteeMap } from "@/api/committee";
+import { getCommitteeData, getXGovCommitteeMap } from "@/api/committee";
+import { getGlobalState } from "@/api/registry";
+import type { RegistryGlobalState } from "@/api/types/registry";
 import {
   type ProposalSummaryCardDetails,
   ProposalStatus,
@@ -34,6 +36,135 @@ const VOTE_PROPOSAL_METHOD = new algosdk.ABIMethod({
 });
 
 const VOTE_PROPOSAL_SELECTOR = VOTE_PROPOSAL_METHOD.getSelector();
+
+const PAST_VOTING_STATUSES = new Set([
+  ProposalStatus.ProposalStatusApproved,
+  ProposalStatus.ProposalStatusRejected,
+  ProposalStatus.ProposalStatusReviewed,
+  ProposalStatus.ProposalStatusFunded,
+  ProposalStatus.ProposalStatusBlocked,
+]);
+
+export interface MissedVoteRiskStats {
+  zeroMissed: number;
+  oneMissed: number;
+  twoMissed: number;
+  threeMissed: number;
+  fourMissed: number;
+  fiveMissed: number;
+}
+
+/**
+ * Counts active xGovs that missed every one of their latest completed proposal
+ * voting opportunities. Any vote among the latest five resets the count to zero.
+ */
+export async function getMissedVoteRiskStats(
+  registryState?: RegistryGlobalState,
+): Promise<MissedVoteRiskStats> {
+  const [registry, proposals] = await Promise.all([
+    registryState ? Promise.resolve(registryState) : getGlobalState(),
+    getAllProposals(),
+  ]);
+  const activeCommittee = registry?.committeeId?.length
+    ? await getCommitteeData(Buffer.from(registry.committeeId))
+    : null;
+  const memberOpportunities = new Map(
+    (activeCommittee?.xGovs ?? []).map((member) => [
+      member.address,
+      [] as bigint[],
+    ]),
+  );
+
+  for (const proposal of proposals
+    .filter(
+      (item) =>
+        PAST_VOTING_STATUSES.has(item.status) &&
+        item.committeeId &&
+        item.committeeId.length > 0,
+    )
+    .sort((a, b) => Number(b.voteOpenTs) - Number(a.voteOpenTs))) {
+    const committee = await getCommitteeData(Buffer.from(proposal.committeeId));
+    if (!committee) continue;
+
+    for (const member of committee.xGovs) {
+      const opportunities = memberOpportunities.get(member.address);
+      if (opportunities && opportunities.length < 5) {
+        opportunities.push(proposal.id);
+      }
+    }
+  }
+
+  const votedProposalIds = await getVotedProposalIds();
+
+  const missedCounts = [0, 0, 0, 0, 0, 0];
+
+  for (const [address, opportunities] of memberOpportunities) {
+    const missedCount = opportunities.some((id) => votedProposalIds.get(address)?.has(id))
+      ? 0
+      : Math.min(opportunities.length, 5);
+    missedCounts[missedCount] += 1;
+  }
+
+  return {
+    zeroMissed: missedCounts[0],
+    oneMissed: missedCounts[1],
+    twoMissed: missedCounts[2],
+    threeMissed: missedCounts[3],
+    fourMissed: missedCounts[4],
+    fiveMissed: missedCounts[5],
+  };
+}
+
+async function getVotedProposalIds(): Promise<Map<string, Set<bigint>>> {
+  const votedProposalIds = new Map<string, Set<bigint>>();
+  let nextToken: string | undefined;
+
+  do {
+    let query = indexer
+      .searchForTransactions()
+      .applicationID(Number(RegistryAppID))
+      .txType("appl")
+      .limit(1000);
+
+    if (nextToken) {
+      query = query.nextToken(nextToken);
+    }
+
+    const response = await query.do();
+    for (const txn of response.transactions) {
+      const appTxn = getIndexerField<Record<string, unknown>>(
+        txn as unknown as Record<string, unknown>,
+        "applicationTransaction",
+        "application-transaction",
+      );
+      if (!appTxn) continue;
+
+      const args = getIndexerField<Array<Uint8Array | string>>(
+        appTxn,
+        "applicationArgs",
+        "application-args",
+      );
+      if (!args || args.length < 3) continue;
+
+      const encodedArgs = args.map(bytesFromIndexerArg);
+      if (!selectorMatches(encodedArgs[0])) continue;
+
+      const proposalId = algosdk.ABIType.from("uint64").decode(
+        encodedArgs[1],
+      ) as bigint;
+      const xgovAddress = algosdk.encodeAddress(encodedArgs[2]);
+      const memberVotes = votedProposalIds.get(xgovAddress) ?? new Set<bigint>();
+      memberVotes.add(proposalId);
+      votedProposalIds.set(xgovAddress, memberVotes);
+    }
+
+    nextToken =
+      response.nextToken ??
+      (response as unknown as Record<string, string | undefined>)["next-token"];
+  } while (nextToken);
+
+  return votedProposalIds;
+}
 
 function selectorMatches(arg: Uint8Array): boolean {
   if (arg.length < 4) return false;

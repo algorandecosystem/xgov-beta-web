@@ -11,6 +11,13 @@ import { cn } from "@/functions/utils";
 import { ConnectController } from "../Connect/Connect.island";
 import { $heroAnimationStore } from "@/stores";
 import { UseQuery, UseWallet } from "@/hooks";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import type { MissedVoteRiskStats } from "@/api/voting-history";
 import { useStore } from "@nanostores/react";
 
 // Helper function to format numbers with commas
@@ -22,6 +29,7 @@ export interface HeroProps {
   title: string;
   description: string;
   xgovs: number;
+  missedVoteStats: MissedVoteRiskStats;
   proposals: number;
   treasury: number;
   votes: number;
@@ -37,7 +45,15 @@ export default function HeroIsland(props: HeroProps) {
   )
 }
 
-export function Hero({ title, description, xgovs, proposals, treasury, votes }: HeroProps) {
+export function Hero({
+  title,
+  description,
+  xgovs,
+  missedVoteStats,
+  proposals,
+  treasury,
+  votes,
+}: HeroProps) {
   const heroAnimationShown = useStore($heroAnimationStore) === "true";
 
   return (
@@ -150,10 +166,35 @@ export function Hero({ title, description, xgovs, proposals, treasury, votes }: 
             className="flex flex-wrap gap-x-8 gap-y-4 sm:gap-x-14 md:gap-x-20 lg:gap-x-40 text-sm font-mono text-white dark:text-algo-black"
           >
             <li className="flex flex-col">
-              <span className="text-bold text-algo-blue-30 dark:text-algo-black-70">
-                xGovs
-              </span>
-              {formatNumber(xgovs)}
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex flex-col text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+                      aria-label="Show active xGov missed-vote breakdown"
+                    >
+                      <span className="text-bold text-algo-blue-30 dark:text-algo-black-70">
+                        xGovs
+                      </span>
+                      <span className="underline decoration-dotted underline-offset-4">
+                        {formatNumber(xgovs)}
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" align="start" alignOffset={16} className="p-3 font-mono">
+                    <p className="mb-2 font-sans font-semibold">Latest missed voting opportunities</p>
+                    <dl className="grid grid-cols-2 gap-x-6 gap-y-1">
+                      <dt>0 missed</dt><dd>{formatNumber(missedVoteStats.zeroMissed)}</dd>
+                      <dt>1 missed</dt><dd>{formatNumber(missedVoteStats.oneMissed)}</dd>
+                      <dt>2 missed</dt><dd>{formatNumber(missedVoteStats.twoMissed)}</dd>
+                      <dt>3 missed</dt><dd>{formatNumber(missedVoteStats.threeMissed)}</dd>
+                      <dt>4 missed</dt><dd>{formatNumber(missedVoteStats.fourMissed)}</dd>
+                      <dt>5 missed (drop-off)</dt><dd>{formatNumber(missedVoteStats.fiveMissed)}</dd>
+                    </dl>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </li>
             <li className="flex flex-col">
               <span className="text-bold text-algo-blue-30 dark:text-algo-black-70">
